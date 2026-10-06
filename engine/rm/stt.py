@@ -1,7 +1,9 @@
-"""Распознавание речи по словам через fal whisper (fal-ai/whisper). Ключ — только из переменной окружения FAL_KEY.
+"""Распознавание речи по словам: fal whisper (fal-ai/whisper, ключ в FAL_KEY) или локальный faster-whisper.
 
-Без ключа шаг не выполняется: печатается понятная ошибка, код выхода 2. Остальной конвейер от ключа не зависит —
-слова можно положить готовым JSON того же формата: {"text": "...", "chunks": [{"timestamp": [s, e], "text": " слово"}]}.
+Движок выбирает переменная RM_STT: `fal` или `local`. Если она не задана — fal при наличии FAL_KEY, иначе локально.
+Локальный движок бесплатный и офлайн (модель — RM_WHISPER_MODEL, по умолчанию small; первый запуск её скачает).
+Оба движка отдают один формат: {"text": "...", "chunks": [{"timestamp": [s, e], "text": " слово"}]} —
+его же можно положить готовым JSON, тогда распознавание не нужно вовсе.
 """
 import base64
 import json
@@ -38,7 +40,49 @@ def audio_mp3(path, start=None, end=None, tempo=None):
     return subprocess.run(cmd, capture_output=True, check=True).stdout
 
 
+def engine():
+    e = os.environ.get('RM_STT', '').strip().lower()
+    if e in ('fal', 'local'):
+        return e
+    return 'fal' if os.environ.get('FAL_KEY', '').strip() else 'local'
+
+
+_MODEL = None
+
+
+def transcribe_local(mp3, level='word', lang='ru'):
+    """faster-whisper на CPU; результат в формате fal chunks."""
+    global _MODEL
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        die('нет FAL_KEY и не установлен faster-whisper: python3 -m pip install faster-whisper '
+            '(или задайте FAL_KEY, или положите слова готовым JSON в формате fal chunks)', 2)
+    if _MODEL is None:
+        name = os.environ.get('RM_WHISPER_MODEL', 'small')
+        log('локальное распознавание: faster-whisper %s (первый запуск скачает модель)' % name)
+        _MODEL = WhisperModel(name, device='cpu', compute_type='int8')
+    # декодируем сами через ffmpeg: так не зависим от версии PyAV внутри faster-whisper
+    import numpy as np
+    pcm = subprocess.run(['ffmpeg', '-v', 'error', '-i', '-', '-ac', '1', '-ar', '16000', '-f', 'f32le', '-'],
+                         input=mp3, capture_output=True, check=True).stdout
+    audio = np.frombuffer(pcm, dtype=np.float32)
+    segs, _ = _MODEL.transcribe(audio, language=lang, word_timestamps=(level == 'word'),
+                                vad_filter=False, condition_on_previous_text=False)
+    segs = list(segs)
+    chunks = []
+    for s in segs:
+        if level == 'word':
+            for w in s.words or []:
+                chunks.append({'timestamp': [round(w.start, 3), round(w.end, 3)], 'text': ' ' + w.word.strip()})
+        else:
+            chunks.append({'timestamp': [round(s.start, 3), round(s.end, 3)], 'text': ' ' + s.text.strip()})
+    return {'text': ''.join(c['text'] for c in chunks).strip(), 'chunks': chunks}
+
+
 def transcribe(mp3, level='word', lang='ru', timeout=300):
+    if engine() == 'local':
+        return transcribe_local(mp3, level, lang)
     body = json.dumps({'audio_url': 'data:audio/mpeg;base64,' + base64.b64encode(mp3).decode(), 'task': 'transcribe',
                        'language': lang, 'chunk_level': level}).encode()
     req = urllib.request.Request(ENDPOINT, data=body, headers={'Authorization': 'Key ' + fal_key(), 'Content-Type': 'application/json'})

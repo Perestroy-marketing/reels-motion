@@ -118,11 +118,18 @@ def check_chromium_fonts():
 
 def check_keys():
     print('Распознавание речи')
+    try:
+        import faster_whisper  # noqa: F401
+        local = True
+    except ImportError:
+        local = False
     if os.environ.get('FAL_KEY'):
-        ok('FAL_KEY задан (stt и qa --stt будут работать)')
+        ok('FAL_KEY задан (stt и qa --stt будут работать через fal)')
+    elif local:
+        ok('нет FAL_KEY — stt и qa --stt пойдут через локальный faster-whisper (бесплатно, офлайн)')
     else:
-        warn('нет FAL_KEY — шаги stt и qa --stt недоступны; остальной конвейер работает',
-             'ключ fal (https://fal.ai) — в переменную окружения FAL_KEY (или положите слова готовым JSON)')
+        warn('нет FAL_KEY и нет faster-whisper — шаги stt и qa --stt недоступны; остальной конвейер работает',
+             'python3 -m pip install faster-whisper, или ключ fal (https://fal.ai) в FAL_KEY, или слова готовым JSON')
 
 
 def main():
